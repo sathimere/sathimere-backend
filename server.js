@@ -1,100 +1,87 @@
-import express from "express";
-import Razorpay from "razorpay";
-import crypto from "crypto";
-import admin from "firebase-admin";
+//--------------------------------------------
+// CONFIG - APNE REAL VALUES YAHI LAGAO
+//--------------------------------------------
+process.env.RAZORPAY_KEY = "rzp_test_xxxxx"; // Apni Razorpay Key ID
+process.env.RAZORPAY_SECRET = "xxxxx";       // Apni Razorpay Secret
+process.env.FIREBASE_URL = "https://yourproject-default-rtdb.firebaseio.com"; // Tera Firebase Realtime DB URL
+
+//--------------------------------------------
+const express = require("express");
+const Razorpay = require("razorpay");
+const cors = require("cors");
+const axios = require("axios");
+const crypto = require("crypto");
 
 const app = express();
 app.use(express.json());
+app.use(cors());
 
-// -----------------------------------
-// FIREBASE ADMIN INITIALIZE
-// -----------------------------------
-// Yahan apna Firebase service account JSON daal
-const serviceAccount = {
-  "type": "service_account",
-  "project_id": "sathimere-415fa",
-  "private_key_id": "XXXX",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nYOUR_PRIVATE_KEY\n-----END PRIVATE KEY-----\n",
-  "client_email": "firebase-adminsdk@yourproject.iam.gserviceaccount.com",
-  "client_id": "1234567890",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/..."
-};
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://sathimere-415fa-default-rtdb.asia-southeast1.firebasedatabase.app"
-});
-
-const db = admin.database();
-
-// -----------------------------------
 // RAZORPAY INSTANCE
-// -----------------------------------
 const razorpay = new Razorpay({
-    key_id: "rzp_live_S0WmjPxxVh7JKJ",
-    key_secret: "YOUR_RAZORPAY_SECRET"
+    key_id: process.env.RAZORPAY_KEY,
+    key_secret: process.env.RAZORPAY_SECRET
 });
 
-// -----------------------------------
+//--------------------------------------------
 // CREATE ORDER
-// -----------------------------------
+//--------------------------------------------
 app.post("/create-order", async (req, res) => {
     try {
         const { amount, uid } = req.body;
+
+        if (!amount || amount <= 0 || !uid) {
+            return res.status(400).json({ error: "Invalid request" });
+        }
+
         const options = {
-            amount: amount * 100, // paise
+            amount: amount * 100, // paise me
             currency: "INR",
-            receipt: `receipt_${Date.now()}_${uid}`
+            receipt: `order_${uid}_${Date.now()}`
         };
+
         const order = await razorpay.orders.create(options);
         res.json(order);
+
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: "Order creation failed" });
     }
 });
 
-// -----------------------------------
-// VERIFY PAYMENT
-// -----------------------------------
+//--------------------------------------------
+// VERIFY PAYMENT + UPDATE WALLET
+//--------------------------------------------
 app.post("/verify-payment", async (req, res) => {
     try {
-        const { payment_id, order_id, signature, uid, amount } = req.body;
+        const { order_id, payment_id, signature, uid, amount } = req.body;
 
-        // Signature verification
-        const generated_signature = crypto.createHmac('sha256', razorpay.key_secret)
-            .update(order_id + "|" + payment_id)
-            .digest('hex');
+        if (!order_id || !payment_id || !signature || !uid || !amount) {
+            return res.status(400).json({ status: "failed", msg: "Missing fields" });
+        }
+
+        // 1️⃣ Signature verify
+        const hmac = crypto.createHmac("sha256", process.env.RAZORPAY_SECRET);
+        hmac.update(order_id + "|" + payment_id);
+        const generated_signature = hmac.digest("hex");
 
         if (generated_signature !== signature) {
             return res.json({ status: "failed", msg: "Signature mismatch" });
         }
 
-        // Fetch existing wallet balance
-        const walletRef = db.ref("wallets/" + uid);
-        const snapshot = await walletRef.once("value");
+        // 2️⃣ Update wallet in Firebase Realtime DB
+        const walletRef = `${process.env.FIREBASE_URL}/wallets/${uid}.json`;
+
+        // Pehle existing balance le lo
+        const currentData = await axios.get(walletRef);
         let currentBalance = 0;
-        if (snapshot.exists()) {
-            currentBalance = snapshot.val().balance || 0;
+        if (currentData.data && currentData.data.balance) {
+            currentBalance = currentData.data.balance;
         }
 
-        // Update wallet balance
-        await walletRef.update({
+        // Update balance
+        await axios.put(walletRef, {
             balance: currentBalance + Number(amount),
             lastUpdate: Date.now()
-        });
-
-        // Save transaction to prevent duplicates
-        const txnRef = db.ref("transactions/" + payment_id);
-        await txnRef.set({
-            uid,
-            amount,
-            order_id,
-            payment_id,
-            addedAt: Date.now()
         });
 
         res.json({ status: "success" });
@@ -105,6 +92,6 @@ app.post("/verify-payment", async (req, res) => {
     }
 });
 
-// -----------------------------------
+//--------------------------------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
